@@ -103,6 +103,7 @@ class CCLModel(BaseModel):
                                                   opt.init_type, opt.init_gain, opt.no_antialias, self.gpu_ids, opt)
         self.vgg16=Vgg16()
         self.model, self.preprocess = clip.load("ViT-B/32", device=self.device)
+        self.text = clip.tokenize(["rain image", "rain-free image"]).to(self.device)
         self.vgg166 =vgg16(torch.load("vgg16-397923af.pth")).features.cuda()
 
 
@@ -263,12 +264,12 @@ class CCLModel(BaseModel):
         else:
             loss_NCE_both = (self.loss_NCE1 + self.loss_NCE2) * 0.5
 
-        loss_cyc_NCE1 = self.calculate_wai_cyc_NCE_loss1(self.real_B, self.rec_A, self.fake_B, self.real_A)
-        loss_cyc_NCE2 = self.calculate_wai_cyc_NCE_loss2(self.real_A, self.rec_B, self.fake_A, self.real_B)
+        loss_cyc_NCE1 = self.calculate_wai_cyc_NCE_loss1(self.real_B, self.rec_A, self.fake_B, self.real_A)+self.calculate_wai_cyc_NCER1(self.real_B, self.rec_A, self.fake_B, self.real_A)
+        loss_cyc_NCE2 = self.calculate_wai_cyc_NCE_loss2(self.real_A, self.rec_B, self.fake_A, self.real_B)+self.calculate_wai_cyc_NCER2(self.real_A, self.rec_B, self.fake_A, self.real_B)
 
         loss_ncyc_NCE1 = self.calculate_DisNCE_loss1(self.real_A, self.fake_B, self.rec_B, self.real_B)
         loss_ncyc_NCE2 = self.calculate_DisNCE_loss2(self.real_A, self.fake_A, self.rec_A, self.real_B)
-        # print(self.fake_A.shape)
+        
         #loss_col1 =self.color1(self.real_A, self.rec_A)
         #loss_col2 = self.color2(self.real_B, self.rec_B)
         #loss_col=loss_col1+loss_col2
@@ -403,21 +404,7 @@ class CCLModel(BaseModel):
 
     def calculate_wai_cyc_NCE_loss1(self, src, tgt, tgt1, rtgt):
 
-        va_vgg = self.vgg16(tgt)
         
-        vb_vgg = self.vgg16(tgt1)
-        vp_vgg = self.vgg16(rtgt)
-        vn_vgg = self.vgg16(src)
-        
-        pixx_loss=0
-        weights = [1.0 / 32, 1.0 / 16, 1.0 / 8, 1.0 / 4, 1.0]
-        for i in range(len(va_vgg)):
-            d_ap = self.l1(va_vgg[i], vp_vgg[i].detach())
-            d_an = self.l1(va_vgg[i], vn_vgg[i].detach())
-            d_ab = self.l1(va_vgg[i], vb_vgg[i].detach())
-            contra = d_ap / (d_an + 0.1 * d_ab + 1e-7)
-            pixx_loss += weights[i] *contra
-            
         tgt=transform.Resize((224,224))(tgt)
         tgt1=transform.Resize((224,224))(tgt1)
         rtgt=transform.Resize((224,224))(rtgt)
@@ -438,26 +425,24 @@ class CCLModel(BaseModel):
             contra = d_ap / (d_an + 0.1 * d_ab + 1e-7)
 
             pix_loss += contra
+        
+        logits_per_image, logits_per_text = self.model(tgt, self.text)
+        probs = logits_per_image.softmax(dim=-1)
+        loss_D_A_CLIP = self.criterionCycle(probs, src)
+
+        logits_per_image, logits_per_text = self.model(tgt1, self.text)
+        probs = logits_per_image.softmax(dim=-1)
+        loss_D_A_CLIP += self.criterionCycle(probs, src)
+        text_loss=loss_D_A_CLIP+loss_D_A_CLIP
 
         #dualloss = pix_loss+pixx_loss
-        dualloss = pix_loss
+        dualloss = pix_loss+text_loss
 
         return dualloss
 
     def calculate_wai_cyc_NCE_loss2(self, src, tgt, tgt1, rtgt):
 
-        va_vgg = self.vgg16(tgt)
-        vb_vgg = self.vgg16(tgt1)
-        vp_vgg = self.vgg16(rtgt)
-        vn_vgg = self.vgg16(src)
-        pixx_loss = 0
-        weights = [1.0 / 32, 1.0 / 16, 1.0 / 8, 1.0 / 4, 1.0]
-        for i in range(len(va_vgg)):
-            d_ap = self.l1(va_vgg[i], vp_vgg[i].detach())
-            d_an = self.l1(va_vgg[i], vn_vgg[i].detach())
-            d_ab = self.l1(va_vgg[i], vb_vgg[i].detach())
-            contra = d_ap / (d_an + 0.1 * d_ab + 1e-7)
-            pixx_loss += weights[i] * contra
+        
 
         tgt = transform.Resize((224, 224))(tgt)
         tgt1 = transform.Resize((224, 224))(tgt1)
@@ -488,11 +473,64 @@ class CCLModel(BaseModel):
             # pix_loss += weights[i] * contra
             pix_loss += contra
             # pix_loss+=weights[i]*d_ap
+        
+        logits_per_image, logits_per_text = self.model(tgt, self.text)
+        probs = logits_per_image.softmax(dim=-1)
+        loss_D_A_CLIP = self.criterionCycle(probs, src)
 
-        dualloss = pix_loss+pixx_loss
+        logits_per_image, logits_per_text = self.model(tgt1, self.text)
+        probs = logits_per_image.softmax(dim=-1)
+        loss_D_A_CLIP += self.criterionCycle(probs, src)
+        text_loss=loss_D_A_CLIP+loss_D_A_CLIP
+
+        dualloss = pix_loss+text_loss
 
         return dualloss
 
+
+    def calculate_wai_cyc_NCER1(self, src, tgt, tgt1, rtgt):
+
+        va_vgg = self.vgg16(tgt)
+        
+        vb_vgg = self.vgg16(tgt1)
+        vp_vgg = self.vgg16(rtgt)
+        vn_vgg = self.vgg16(src)
+        
+        pixx_loss=0
+        weights = [1.0 / 32, 1.0 / 16, 1.0 / 8, 1.0 / 4, 1.0]
+        for i in range(len(va_vgg)):
+            d_ap = self.l1(va_vgg[i], vp_vgg[i].detach())
+            d_an = self.l1(va_vgg[i], vn_vgg[i].detach())
+            d_ab = self.l1(va_vgg[i], vb_vgg[i].detach())
+            contra = d_ap / (d_an + 0.1 * d_ab + 1e-7)
+            pixx_loss += weights[i] *contra
+            
+        
+        dualloss = pixx_loss
+        
+
+        return dualloss
+
+    def calculate_wai_cyc_NCER2(self, src, tgt, tgt1, rtgt):
+
+        va_vgg = self.vgg16(tgt)
+        vb_vgg = self.vgg16(tgt1)
+        vp_vgg = self.vgg16(rtgt)
+        vn_vgg = self.vgg16(src)
+        pixx_loss = 0
+        weights = [1.0 / 32, 1.0 / 16, 1.0 / 8, 1.0 / 4, 1.0]
+        for i in range(len(va_vgg)):
+            d_ap = self.l1(va_vgg[i], vp_vgg[i].detach())
+            d_an = self.l1(va_vgg[i], vn_vgg[i].detach())
+            d_ab = self.l1(va_vgg[i], vb_vgg[i].detach())
+            contra = d_ap / (d_an + 0.1 * d_ab + 1e-7)
+            pixx_loss += weights[i] * contra
+
+        
+
+        dualloss = pixx_loss
+
+        return dualloss
 
 
     def calculate_tri_NCE_loss2(self, src, tgt, rtgt):
